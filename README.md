@@ -7,7 +7,9 @@ A StonkFun-style, non-custodial board for creating and trading Pump bonding-curv
 - Wallet-standard Solana wallet connection
 - Token-2022 coin creation through Pump `create_v2`
 - Optional atomic first buy and holder-rewards mode
-- Live on-chain bonding-curve state and balances
+- Live on-chain bonding-curve state, market cap, and price
+- Trading chart and recent buy/sell history from the bonding curve
+- Launch confirmation with the token contract address and a shareable buy link
 - Pump `buy_v2` / `sell_v2` trading with slippage protection
 - Metadata upload through the same-origin `/api/ipfs` proxy, or a custom metadata URI
 
