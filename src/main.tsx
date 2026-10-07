@@ -7,7 +7,7 @@ import "./styles.css";
 import App from "./App";
 
 const endpoint =
-  import.meta.env.VITE_SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
+  import.meta.env.VITE_SOLANA_RPC_URL || "https://solana-rpc.publicnode.com";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

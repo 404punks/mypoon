@@ -19,7 +19,7 @@ cp .env.example .env
 npm run dev
 ```
 
-For production, use a dedicated Solana mainnet RPC. The public endpoint is rate-limited.
+The app reads mainnet through `https://solana-rpc.publicnode.com`. Solana's own `api.mainnet-beta.solana.com` returns `403 Access forbidden` to browser apps, which blocks token creation. Set a private mainnet RPC for production if you have one.
 
 ```env
 VITE_SOLANA_RPC_URL=https://your-mainnet-rpc.example
