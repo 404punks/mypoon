@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import {
@@ -12,7 +12,6 @@ import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
-  getAssociatedTokenAddress,
 } from "@solana/spl-token";
 import {
   getBuyTokenAmountFromSolAmount,
@@ -22,8 +21,22 @@ import {
 } from "@pump-fun/pump-sdk";
 import BN from "bn.js";
 import { ImagePlus, LoaderCircle, Search } from "lucide-react";
+import {
+  bondingCurveAddress,
+  chartPoints,
+  formatSolNumber,
+  formatUsd,
+  lamportsToNumber,
+  loadCoinMeta,
+  loadCurveTrades,
+  quoteMarketCap,
+  solPerWholeToken,
+  type ChartPoint,
+  type CoinMeta,
+  type CurveTrade,
+} from "./market";
 
-type Route = { name: "home" } | { name: "launch" } | { name: "token"; mint: string };
+type Route = { name: "home" } | { name: "launch" } | { name: "token"; mint: string; created: boolean };
 type Side = "buy" | "sell";
 type Notice = { kind: "success" | "error" | "info"; message: string; signature?: string };
 type SavedCoin = {
@@ -57,6 +70,7 @@ type LaunchForm = {
 
 const EXPLORER = "https://solscan.io";
 const STORAGE_KEY = "stonklab.coins.v1";
+const CREATED_KEY = "stonklab.created.v1";
 const QUOTES = ["xStocks", "PreStocks", "Currencies", "Collectibles", "Solana", "Custom"];
 
 const initialLaunch: LaunchForm = {
@@ -74,9 +88,14 @@ const initialLaunch: LaunchForm = {
 };
 
 function readRoute(): Route {
-  const path = location.hash.replace(/^#/, "") || "/";
+  const hash = location.hash.replace(/^#/, "") || "/";
+  const queryAt = hash.indexOf("?");
+  const path = queryAt === -1 ? hash : hash.slice(0, queryAt);
+  const params = new URLSearchParams(queryAt === -1 ? "" : hash.slice(queryAt + 1));
   if (path.startsWith("/launch")) return { name: "launch" };
-  if (path.startsWith("/token/")) return { name: "token", mint: decodeURIComponent(path.slice("/token/".length)) };
+  if (path.startsWith("/token/")) {
+    return { name: "token", mint: decodeURIComponent(path.slice("/token/".length)), created: params.get("created") === "1" };
+  }
   return { name: "home" };
 }
 
@@ -92,6 +111,12 @@ function toBaseUnits(value: string, decimals: number): BN {
   const [whole = "0", fraction = ""] = normalized.split(".");
   if (fraction.length > decimals) throw new Error(`Use no more than ${decimals} decimal places.`);
   return new BN((whole || "0") + fraction.padEnd(decimals, "0"));
+}
+
+function readU64(data: Uint8Array, offset: number) {
+  let value = new BN(0);
+  for (let index = 7; index >= 0; index -= 1) value = value.shln(8).iaddn(data[offset + index]);
+  return value;
 }
 
 function fromBaseUnits(value: BN, decimals: number, precision = 4) {
@@ -111,6 +136,7 @@ function friendlyError(error: unknown) {
   if (message.includes("User rejected")) return "Transaction cancelled in your wallet.";
   if (message.includes("Attempt to debit")) return "Your wallet does not have enough SOL.";
   if (message.includes("429")) return "The public RPC is busy. Set VITE_SOLANA_RPC_URL to a private mainnet endpoint.";
+  if (message.includes("Indexed requests") || message.includes("personal token")) return "This public RPC blocks that lookup. Set VITE_SOLANA_RPC_URL to a full mainnet endpoint.";
   if (message.includes("Access forbidden") || message.includes("403")) return "The Solana RPC refused the request. Reload after the latest deploy, or set VITE_SOLANA_RPC_URL to a mainnet endpoint that allows browser access.";
   if (message === "Failed to fetch") return "The metadata upload could not reach the server. Reload the page and try again.";
   return message.replace(/^Error: /, "").slice(0, 280);
@@ -125,13 +151,66 @@ function readCoins(): SavedCoin[] {
   }
 }
 
-function saveCoin(coin: SavedCoin) {
-  const next = [coin, ...readCoins().filter((item) => item.mint !== coin.mint)].slice(0, 48);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next.map((item) => ({
+function persistCoins(next: SavedCoin[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next.slice(0, 48).map((item) => ({
     ...item,
     image: item.image?.startsWith("blob:") ? undefined : item.image,
   }))));
-  return next;
+  return next.slice(0, 48);
+}
+
+function saveCoin(coin: SavedCoin) {
+  return persistCoins([coin, ...readCoins().filter((item) => item.mint !== coin.mint)]);
+}
+
+function upsertCoin(coin: SavedCoin) {
+  const current = readCoins();
+  const existing = current.find((item) => item.mint === coin.mint);
+  if (!existing) return saveCoin(coin);
+  return persistCoins(current.map((item) => item.mint === coin.mint
+    ? { ...item, name: coin.name || item.name, symbol: coin.symbol || item.symbol, image: coin.image || item.image, holderReward: coin.holderReward }
+    : item));
+}
+
+function rememberCreation(mint: string, signature: string) {
+  sessionStorage.setItem(CREATED_KEY, JSON.stringify({ mint, signature }));
+}
+
+function readCreation(mint: string) {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(CREATED_KEY) || "null") as { mint?: string; signature?: string } | null;
+    return parsed?.mint === mint ? parsed.signature || "" : "";
+  } catch {
+    return "";
+  }
+}
+
+function buyLink(mint: string) {
+  return `${location.origin}${location.pathname}#/token/${mint}`;
+}
+
+function relTime(timestamp: number) {
+  const delta = Date.now() / 1000 - timestamp;
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "—";
+  if (delta < 60) return "just now";
+  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+async function copyText(value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = value;
+    area.style.position = "fixed";
+    area.style.left = "-9999px";
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
 }
 
 async function uploadMetadata(form: LaunchForm) {
@@ -162,6 +241,61 @@ function Mark() {
   );
 }
 
+function CopyButton({ value }: { value: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button type="button" className="copy-btn" onClick={() => {
+      void copyText(value).then(() => {
+        setDone(true);
+        window.setTimeout(() => setDone(false), 1400);
+      });
+    }}>{done ? "Copied" : "Copy"}</button>
+  );
+}
+
+function ShareRows({ mint }: { mint: string }) {
+  const link = buyLink(mint);
+  return (
+    <>
+      <div className="copy-row"><span>Contract</span><code title={mint}>{mint}</code><CopyButton value={mint} /></div>
+      <div className="copy-row"><span>Buy link</span><code title={link}>{link}</code><CopyButton value={link} /></div>
+    </>
+  );
+}
+
+function PriceChart({ points }: { points: ChartPoint[] }) {
+  if (points.length === 0) {
+    return <div className="chart-empty">The chart appears after the bonding curve loads.</div>;
+  }
+  const width = 640;
+  const height = 220;
+  const pad = { l: 8, r: 8, t: 18, b: 12 };
+  const prices = points.map((point) => point.price);
+  let min = Math.min(...prices);
+  let max = Math.max(...prices);
+  if (min === max) {
+    const padPrice = Math.abs(min) * 0.04 || 1e-9;
+    min -= padPrice;
+    max += padPrice;
+  }
+  const xAt = (index: number) => pad.l + (points.length === 1 ? (width - pad.l - pad.r) / 2 : (index / (points.length - 1)) * (width - pad.l - pad.r));
+  const yAt = (price: number) => pad.t + (1 - (price - min) / (max - min)) * (height - pad.t - pad.b);
+  const line = points.map((point, index) => `${index === 0 ? "M" : "L"}${xAt(index).toFixed(1)},${yAt(point.price).toFixed(1)}`).join(" ");
+  const area = `${line} L${xAt(points.length - 1).toFixed(1)},${(height - pad.b).toFixed(1)} L${xAt(0).toFixed(1)},${(height - pad.b).toFixed(1)} Z`;
+  const rising = points[points.length - 1].price >= points[0].price;
+  const color = rising ? "#39d6a3" : "#fb7185";
+  return (
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Bonding curve price chart">
+      {[0.25, 0.5, 0.75].map((mark) => (
+        <line key={mark} x1={pad.l} x2={width - pad.r} y1={pad.t + mark * (height - pad.t - pad.b)} y2={pad.t + mark * (height - pad.t - pad.b)} stroke="#20363d" strokeWidth="1" />
+      ))}
+      <path d={area} fill={color} opacity="0.16" />
+      <path d={line} fill="none" stroke={color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={xAt(points.length - 1)} cy={yAt(points[points.length - 1].price)} r="4.5" fill={color} />
+    </svg>
+  );
+}
+
 export default function App() {
   const { connection } = useConnection();
   const wallet = useWallet();
@@ -181,6 +315,12 @@ export default function App() {
   const [tradeAmount, setTradeAmount] = useState("");
   const [slippage, setSlippage] = useState("1");
   const [quote, setQuote] = useState<BN | null>(null);
+  const [meta, setMeta] = useState<CoinMeta | null>(null);
+  const [trades, setTrades] = useState<CurveTrade[]>([]);
+  const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [caps, setCaps] = useState<Record<string, string>>({});
+  const [solUsd, setSolUsd] = useState(0);
+  const marketRequest = useRef(0);
 
   const sdk = useMemo(() => new OnlinePumpSdk(connection), [connection]);
   const shown = [...coins].sort((a, b) => (sort === "name" ? a.symbol.localeCompare(b.symbol) : b.createdAt - a.createdAt));
@@ -208,6 +348,42 @@ export default function App() {
     sdk.fetchGlobal().then((global) => setSupplyLabel(fromBaseUnits(global.tokenTotalSupply, 6, 0))).catch(() => undefined);
   }, [sdk]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd")
+      .then((response) => response.json())
+      .then((data: { solana?: { usd?: number } }) => {
+        if (!cancelled && typeof data.solana?.usd === "number") setSolUsd(data.solana.usd);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (route.name !== "home" || coins.length === 0) return;
+    let cancelled = false;
+    const rows = coins.slice(0, 24).flatMap((coin) => {
+      try { return [{ mint: coin.mint, pda: bondingCurveAddress(new PublicKey(coin.mint)) }]; }
+      catch { return []; }
+    });
+    if (rows.length === 0) return;
+    connection.getMultipleAccountsInfo(rows.map((row) => row.pda)).then((accounts) => {
+      if (cancelled) return;
+      const next: Record<string, string> = {};
+      accounts.forEach((account, index) => {
+        if (!account) return;
+        try {
+          const decoded = PUMP_SDK.decodeBondingCurve(account);
+          next[rows[index].mint] = decoded.complete || decoded.virtualTokenReserves.isZero()
+            ? "Graduated"
+            : `${formatSolNumber(lamportsToNumber(quoteMarketCap(decoded)))} SOL`;
+        } catch { /* leave the card without a cap */ }
+      });
+      setCaps(next);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [coins, connection, route.name]);
+
   const send = useCallback(async (instructions: TransactionInstruction[], signers: Keypair[] = [], units = 400_000) => {
     if (!wallet.publicKey || !wallet.sendTransaction) throw new Error("Connect your wallet first.");
     const transaction = new Transaction().add(
@@ -224,6 +400,38 @@ export default function App() {
     return signature;
   }, [connection, wallet]);
 
+  const tokenMint = route.name === "token" ? route.mint : "";
+
+  const loadMarket = useCallback(async (mint: PublicKey, programId: PublicKey, holderReward: boolean) => {
+    const request = ++marketRequest.current;
+    setHistoryState("loading");
+    setMeta(null);
+    setTrades([]);
+    const [metaResult, tradeResult] = await Promise.allSettled([
+      loadCoinMeta(connection, mint, programId),
+      loadCurveTrades(connection, mint),
+    ]);
+    if (request !== marketRequest.current) return;
+    if (metaResult.status === "fulfilled" && metaResult.value) {
+      const details = metaResult.value;
+      setMeta(details);
+      setCoins(upsertCoin({
+        mint: mint.toBase58(),
+        name: details.name,
+        symbol: details.symbol,
+        image: details.image,
+        createdAt: Date.now(),
+        holderReward,
+      }));
+    }
+    if (tradeResult.status === "fulfilled") {
+      setTrades(tradeResult.value);
+      setHistoryState("ready");
+    } else {
+      setHistoryState("error");
+    }
+  }, [connection]);
+
   const loadCoin = useCallback(async (mintText: string) => {
     setBusy("load");
     setQuote(null);
@@ -234,39 +442,37 @@ export default function App() {
       if (!mintAccount || (!mintAccount.owner.equals(TOKEN_PROGRAM_ID) && !mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID))) {
         throw new Error("That address is not a token mint.");
       }
-      const [global, feeConfig, state, supplyResult] = await Promise.all([
+      const [global, feeConfig, state] = await Promise.all([
         sdk.fetchGlobal(),
         sdk.fetchFeeConfig(),
         sdk.fetchBuyState(mint, user, mintAccount.owner),
-        connection.getTokenSupply(mint),
       ]);
-      const ata = await getAssociatedTokenAddress(mint, user, true, mintAccount.owner);
-      const balance = wallet.publicKey
-        ? await connection.getTokenAccountBalance(ata).catch(() => null)
-        : null;
+      const accountData = state.associatedUserAccountInfo?.data;
+      const balance = accountData && accountData.length >= 72 ? readU64(accountData, 64) : new BN(0);
       setCurve({
         ...state,
         tokenProgram: mintAccount.owner,
-        supply: new BN(supplyResult.value.amount),
-        balance: new BN(balance?.value.amount ?? 0),
+        supply: state.bondingCurve.tokenTotalSupply,
+        balance,
         global,
         feeConfig,
       });
+      void loadMarket(mint, mintAccount.owner, state.bondingCurve.isHolderReward);
     } catch (error) {
       setCurve(null);
       setNotice({ kind: "error", message: friendlyError(error) });
     } finally {
       setBusy("");
     }
-  }, [connection, sdk, wallet.publicKey]);
+  }, [connection, loadMarket, sdk, wallet.publicKey]);
 
   useEffect(() => {
-    if (route.name !== "token") return;
+    if (!tokenMint) return;
     setTradeAmount("");
     setQuote(null);
     setSide("buy");
-    void loadCoin(route.mint);
-  }, [loadCoin, route]);
+    void loadCoin(tokenMint);
+  }, [loadCoin, tokenMint]);
 
   function quoteTrade(value: string, selected: Side, state = curve) {
     if (!state || !value) return setQuote(null);
@@ -347,8 +553,9 @@ export default function App() {
       setCoins(saveCoin(coin));
       setLaunch(initialLaunch);
       setPreview("");
-      setNotice({ kind: "success", message: "Token and bonding curve are live on Solana mainnet.", signature });
-      go(`/token/${coin.mint}`);
+      rememberCreation(coin.mint, signature);
+      setNotice(null);
+      go(`/token/${coin.mint}?created=1`);
     } catch (error) {
       setNotice({ kind: "error", message: friendlyError(error) });
     } finally {
@@ -411,6 +618,34 @@ export default function App() {
   }
 
   const saved = route.name === "token" ? coins.find((coin) => coin.mint === route.mint) : undefined;
+  const displayName = meta?.name || saved?.name || "Pump coin";
+  const displaySymbol = meta?.symbol || saved?.symbol || "TOKEN";
+  const displayImage = meta?.image || saved?.image;
+  const solQuote = !curve || curve.bondingCurve.quoteMint.equals(NATIVE_MINT) || curve.bondingCurve.quoteMint.equals(PublicKey.default);
+  const latestTrade = trades[0];
+  const liveReserves = curve && !curve.bondingCurve.virtualTokenReserves.isZero() && !curve.bondingCurve.virtualQuoteReserves.isZero();
+  let marketCapSol = 0;
+  if (curve && solQuote) {
+    try {
+      marketCapSol = lamportsToNumber(quoteMarketCap(liveReserves ? curve.bondingCurve : latestTrade ? {
+        tokenTotalSupply: curve.bondingCurve.tokenTotalSupply,
+        virtualQuoteReserves: latestTrade.virtualSolReserves,
+        virtualTokenReserves: latestTrade.virtualTokenReserves,
+      } : curve.bondingCurve));
+    } catch { marketCapSol = 0; }
+  }
+  const livePrice = curve ? solPerWholeToken(curve.bondingCurve.virtualQuoteReserves, curve.bondingCurve.virtualTokenReserves) : 0;
+  const priceSol = livePrice > 0 ? livePrice : latestTrade ? solPerWholeToken(latestTrade.virtualSolReserves, latestTrade.virtualTokenReserves) : 0;
+  const points = chartPoints(
+    trades,
+    curve?.bondingCurve.virtualQuoteReserves,
+    curve?.bondingCurve.virtualTokenReserves,
+  );
+  const priceChange = points.length >= 2 && points[0].price > 0
+    ? ((points[points.length - 1].price - points[0].price) / points[0].price) * 100
+    : 0;
+  const recentVolume = trades.reduce((sum, trade) => sum.add(trade.solAmount), new BN(0));
+  const createdSignature = route.name === "token" ? readCreation(route.mint) : "";
   const progress = curve
     ? Math.min(100, Math.max(0, 100 * (1 - curve.bondingCurve.realTokenReserves.toNumber() / Math.max(1, curve.global.initialRealTokenReserves.toNumber()))))
     : 0;
@@ -468,7 +703,10 @@ export default function App() {
                 <button key={coin.mint} className="card" onClick={() => go(`/token/${coin.mint}`)}>
                   <div className="thumb">{coin.image ? <img src={coin.image} alt="" /> : coin.symbol.slice(0, 2)}</div>
                   <div className="card-top"><div><b>${coin.symbol}</b><small>{coin.name}</small></div><span className="tag">SOL</span></div>
-                  <small>{coin.holderReward ? "Holder rewards" : "Standard"} · {shortAddress(coin.mint, 4)}</small>
+                  <div className="card-foot">
+                    <span>{caps[coin.mint] ? (caps[coin.mint] === "Graduated" ? "Graduated" : `${caps[coin.mint]} mcap`) : "Bonding curve"}</span>
+                    <span>{coin.holderReward ? "Holder rewards" : shortAddress(coin.mint, 4)}</span>
+                  </div>
                 </button>
               ))}
             </div>
@@ -543,17 +781,65 @@ export default function App() {
 
         {route.name === "token" && (
           <section className="token-layout">
-            <div>
+            <div className="token-main">
               <button className="text-btn" onClick={() => go("/")}>← Board</button>
-              <div className="token-head" style={{ marginTop: 12 }}>
-                {saved?.image ? <img src={saved.image} alt="" /> : <div className="token-fallback">{(saved?.symbol || "SOL").slice(0, 2)}</div>}
+              {route.created && (
+                <section className="confirm">
+                  <div className="live-pill"><i /> Live on Solana mainnet</div>
+                  <h2>{createdSignature ? "Your token is live" : "This token is live"}</h2>
+                  <p>{displayName} has a Pump bonding curve. Copy the contract address or the buy link and share it.</p>
+                  <ShareRows mint={route.mint} />
+                  <div className="confirm-actions">
+                    <a className="ghost" href={`${EXPLORER}/token/${route.mint}`} target="_blank" rel="noreferrer">View contract</a>
+                    {createdSignature && <a className="ghost" href={`${EXPLORER}/tx/${createdSignature}`} target="_blank" rel="noreferrer">Creation tx</a>}
+                    <button type="button" className="primary" onClick={() => go(`/token/${route.mint}`)}>Trade this token</button>
+                  </div>
+                </section>
+              )}
+              <div className="token-head">
+                {displayImage ? <img src={displayImage} alt="" /> : <div className="token-fallback">{displaySymbol.slice(0, 2)}</div>}
                 <div>
-                  <h1>{saved?.name || "Pump coin"}</h1>
-                  <p>${saved?.symbol || "TOKEN"} · paired with SOL {saved?.holderReward ? "· holder rewards" : ""}</p>
-                  <a className="addr" href={`${EXPLORER}/token/${route.mint}`} target="_blank" rel="noreferrer">{shortAddress(route.mint, 8)}</a>
+                  <h1>{displayName}</h1>
+                  <p>${displaySymbol} · paired with SOL {(curve?.bondingCurve.isHolderReward || saved?.holderReward) ? "· holder rewards" : ""}</p>
+                  {meta?.description && <p className="token-desc">{meta.description}</p>}
                 </div>
               </div>
-              <div className="panel" style={{ marginTop: 16 }}>
+              <div className="stats">
+                <div className="stat">
+                  <span>{curve?.bondingCurve.complete ? "Curve mcap" : "Market cap"}</span>
+                  <b>{curve && solQuote ? `${formatSolNumber(marketCapSol)} SOL` : curve ? "Other quote" : "—"}</b>
+                  {solUsd > 0 && marketCapSol > 0 && <small>{formatUsd(marketCapSol * solUsd)}</small>}
+                </div>
+                <div className="stat">
+                  <span>{curve?.bondingCurve.complete ? "Last price" : "Price"}</span>
+                  <b>{curve ? `${formatSolNumber(priceSol)} SOL` : "—"}</b>
+                  {solUsd > 0 && priceSol > 0 && <small>{formatUsd(priceSol * solUsd)}</small>}
+                </div>
+                <div className="stat">
+                  <span>Curve</span>
+                  <b>{curve ? `${progress.toFixed(1)}%` : "—"}</b>
+                  <small>{curve?.bondingCurve.complete ? "Graduated" : "Bonding curve"}</small>
+                </div>
+                <div className="stat">
+                  <span>Recent volume</span>
+                  <b>{historyState === "ready" ? `${fromBaseUnits(recentVolume, 9, 3)} SOL` : "—"}</b>
+                  <small>{trades.length} shown trades</small>
+                </div>
+              </div>
+              <div className="panel chart-panel">
+                <div className="chart-head">
+                  <div>
+                    <div className="kicker">Trading chart</div>
+                    <strong>{curve ? `${formatSolNumber(priceSol)} SOL` : "Loading price"}</strong>
+                  </div>
+                  {trades.length >= 2 && points[0]?.price > 0 && (
+                    <b className={priceChange >= 0 ? "up" : "down"}>{priceChange >= 0 ? "+" : ""}{priceChange.toFixed(2)}%</b>
+                  )}
+                </div>
+                <div className="chart-wrap"><PriceChart points={points} /></div>
+                <p className="fine">Each point is the SOL price after a buy or sell on this bonding curve.</p>
+              </div>
+              <div className="panel">
                 {busy === "load" && !curve ? <p className="muted">Reading the bonding curve…</p> : curve ? (
                   <>
                     <div className="field-head"><span>Bonding curve</span><b>{progress.toFixed(1)}%</b></div>
@@ -562,8 +848,40 @@ export default function App() {
                   </>
                 ) : <p className="muted">Curve data will appear here after it loads.</p>}
               </div>
+              <div className="panel">
+                <div className="kicker">Buy and sell history</div>
+                {historyState === "loading" && <p className="muted">Loading recent trades…</p>}
+                {historyState === "error" && <p className="muted">Trade history could not be loaded. The price and market cap above still come from the live curve.</p>}
+                {historyState === "ready" && trades.length === 0 && <p className="muted">No buys or sells yet. The first trade will show up here.</p>}
+                {trades.length > 0 && (
+                  <div className="trades-scroll">
+                    <table className="trades">
+                      <thead>
+                        <tr><th>Side</th><th>SOL</th><th>Tokens</th><th>Trader</th><th>Time</th><th></th></tr>
+                      </thead>
+                      <tbody>
+                        {trades.map((trade) => (
+                          <tr key={`${trade.signature}-${trade.timestamp}-${trade.solAmount.toString()}`}>
+                            <td className={trade.isBuy ? "side-buy" : "side-sell"}>{trade.isBuy ? "Buy" : "Sell"}</td>
+                            <td>{fromBaseUnits(trade.solAmount, 9, 4)}</td>
+                            <td>{fromBaseUnits(trade.tokenAmount, 6, 2)}</td>
+                            <td className="mono">{shortAddress(trade.user, 4)}</td>
+                            <td>{relTime(trade.timestamp)}</td>
+                            <td><a href={`${EXPLORER}/tx/${trade.signature}`} target="_blank" rel="noreferrer">Tx</a></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+              <div className="panel">
+                <div className="kicker">Contract and buy link</div>
+                <ShareRows mint={route.mint} />
+                <p className="fine">Anyone with the buy link can open this coin, see the chart, and trade it from a connected wallet.</p>
+              </div>
             </div>
-            <form className="panel" onSubmit={executeTrade}>
+            <form className="panel trade-card" onSubmit={executeTrade}>
               <div className="sides">
                 <button type="button" className={side === "buy" ? "on-buy" : ""} onClick={() => { setSide("buy"); setTradeAmount(""); setQuote(null); }}>Buy</button>
                 <button type="button" className={side === "sell" ? "on-sell" : ""} onClick={() => { setSide("sell"); setTradeAmount(""); setQuote(null); }}>Sell</button>
@@ -574,8 +892,8 @@ export default function App() {
               {side === "sell" && curve && <button type="button" className="linkish" onClick={() => { const max = fromBaseUnits(curve.balance, 6, 6).replace(/,/g, ""); setTradeAmount(max); quoteTrade(max, "sell"); }}>Balance {fromBaseUnits(curve.balance, 6, 2)} · Max</button>}
               <div className="quote-line"><span>Estimated received</span><b>{quote ? `${fromBaseUnits(quote, side === "buy" ? 6 : 9, 6)} ${side === "buy" ? "tokens" : "SOL"}` : "—"}</b></div>
               <label className="field"><span>Slippage tolerance</span><input inputMode="decimal" value={slippage} onChange={(event) => setSlippage(event.target.value)} /></label>
-              <button className="primary" style={{ marginTop: 14 }} disabled={busy === "trade" || !quote || Boolean(curve?.bondingCurve.complete)}>{busy === "trade" ? "Confirming…" : wallet.publicKey ? `${side === "buy" ? "Buy" : "Sell"} on curve` : "Connect wallet"}</button>
-              {!wallet.publicKey && <button type="button" className="ghost" style={{ width: "100%", marginTop: 8 }} onClick={() => setVisible(true)}>Connect</button>}
+              <button className="primary" style={{ marginTop: 14 }} disabled={busy === "trade" || !quote || Boolean(curve?.bondingCurve.complete)}>{curve?.bondingCurve.complete ? "Curve graduated" : busy === "trade" ? "Confirming…" : wallet.publicKey ? `${side === "buy" ? "Buy" : "Sell"} on curve` : "Connect wallet"}</button>
+              {!wallet.publicKey && !curve?.bondingCurve.complete && <button type="button" className="ghost" style={{ width: "100%", marginTop: 8 }} onClick={() => setVisible(true)}>Connect</button>}
             </form>
           </section>
         )}
