@@ -111,6 +111,7 @@ function friendlyError(error: unknown) {
   if (message.includes("User rejected")) return "Transaction cancelled in your wallet.";
   if (message.includes("Attempt to debit")) return "Your wallet does not have enough SOL.";
   if (message.includes("429")) return "The public RPC is busy. Set VITE_SOLANA_RPC_URL to a private mainnet endpoint.";
+  if (message === "Failed to fetch") return "The metadata upload could not reach the server. Reload the page and try again.";
   return message.replace(/^Error: /, "").slice(0, 280);
 }
 
@@ -144,7 +145,7 @@ async function uploadMetadata(form: LaunchForm) {
   payload.append("telegram", form.telegram.trim());
   payload.append("website", form.website.trim());
   payload.append("showName", "true");
-  const response = await fetch("https://pump.fun/api/ipfs", { method: "POST", body: payload });
+  const response = await fetch("/api/ipfs", { method: "POST", body: payload });
   if (!response.ok) throw new Error(`Metadata upload failed (${response.status}). Use a metadata URI instead.`);
   const result = (await response.json()) as { metadataUri?: string };
   if (!result.metadataUri) throw new Error("Metadata service did not return a URI.");
