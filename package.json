@@ -1,0 +1,44 @@
+{
+  "name": "curvelab",
+  "version": "1.0.0",
+  "description": "A non-custodial Pump bonding curve interface for Solana mainnet",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit --pretty false",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/404punks/mypoon.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/404punks/mypoon/issues"
+  },
+  "homepage": "https://github.com/404punks/mypoon#readme",
+  "dependencies": {
+    "@pump-fun/pump-sdk": "^2.0.0",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/wallet-adapter-base": "^0.9.28",
+    "@solana/wallet-adapter-react": "^0.15.40",
+    "@solana/wallet-adapter-react-ui": "^0.9.40",
+    "@solana/web3.js": "^1.99.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "bn.js": "^5.2.5",
+    "lucide-react": "^1.52.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.3"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0"
+  }
+}
