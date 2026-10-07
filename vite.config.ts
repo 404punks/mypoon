@@ -16,4 +16,12 @@ export default defineConfig({
   define: {
     global: "globalThis",
   },
+  server: {
+    proxy: {
+      "/api/ipfs": {
+        target: "https://pump.fun",
+        changeOrigin: true,
+      },
+    },
+  },
 });
