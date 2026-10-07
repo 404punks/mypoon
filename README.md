@@ -9,7 +9,7 @@ A StonkFun-style, non-custodial board for creating and trading Pump bonding-curv
 - Optional atomic first buy and holder-rewards mode
 - Live on-chain bonding-curve state and balances
 - Pump `buy_v2` / `sell_v2` trading with slippage protection
-- Metadata upload through Pump's IPFS endpoint, or a custom metadata URI
+- Metadata upload through the same-origin `/api/ipfs` proxy, or a custom metadata URI
 
 ## Run locally
 
