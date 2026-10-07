@@ -1,6 +1,6 @@
-# CurveLab
+# StonkLab
 
-A polished, non-custodial web interface for creating and trading Pump bonding-curve tokens on Solana mainnet.
+A StonkFun-style, non-custodial board for creating and trading Pump bonding-curve tokens on Solana mainnet.
 
 ## Features
 
@@ -27,4 +27,4 @@ VITE_SOLANA_RPC_URL=https://your-mainnet-rpc.example
 
 ## Important
 
-This is an independent interface, not an official Pump product. Transactions use real SOL and are irreversible. The app never requests or stores private keys; connected wallets sign transactions locally.
+This is an independent interface. It is not the official StonkFun or Pump product. Transactions use real SOL and are irreversible. The app never requests or stores private keys; connected wallets sign transactions locally.
